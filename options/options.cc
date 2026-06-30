@@ -82,6 +82,9 @@ AdvancedColumnFamilyOptions::AdvancedColumnFamilyOptions(const Options& options)
       max_sequential_skip_in_iterations(
           options.max_sequential_skip_in_iterations),
       memtable_factory(options.memtable_factory),
+      skip_list_memtable_factory(options.skip_list_memtable_factory),
+      hash_skip_list_memtable_factory(options.hash_skip_list_memtable_factory),
+      vector_memtable_factory(options.vector_memtable_factory),
       table_properties_collector_factories(
           options.table_properties_collector_factories),
       max_successive_merges(options.max_successive_merges),
@@ -157,6 +160,12 @@ void ColumnFamilyOptions::Dump(Logger* log) const {
       sst_partitioner_factory ? sst_partitioner_factory->Name() : "None");
   ROCKS_LOG_HEADER(log, "        Options.memtable_factory: %s",
                    memtable_factory->Name());
+  ROCKS_LOG_HEADER(log, "        Options.skip_list_memtable_factory: %s",
+                   skip_list_memtable_factory->Name());
+  ROCKS_LOG_HEADER(log, "        Options.hash_skip_list_memtable_factory: %s",
+                   hash_skip_list_memtable_factory->Name());
+  ROCKS_LOG_HEADER(log, "        Options.vector_memtable_factory: %s",
+                   vector_memtable_factory->Name());
   ROCKS_LOG_HEADER(log, "           Options.table_factory: %s",
                    table_factory->Name());
   ROCKS_LOG_HEADER(log, "           table_factory options: %s",
@@ -452,6 +461,23 @@ void ColumnFamilyOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(log, "           Options.memtable_max_range_deletions: %d",
                    memtable_max_range_deletions);
 }  // ColumnFamilyOptions::Dump
+
+void ColumnFamilyOptions::DumpMemtable() const {
+  printf("Current ColumnFamilyOptions:\n");
+  printf("                 Options.memtable_factory: %s\n", memtable_factory->Name());
+  printf("       Options.skip_list_memtable_factory: %s\n", skip_list_memtable_factory->Name());
+  printf(". Options.hash_skip_list_memtable_factory: %s\n", hash_skip_list_memtable_factory->Name());
+  printf("          Options.vector_memtable_factory: %s\n", vector_memtable_factory->Name());
+  printf("                Options.write_buffer_size: %zu\n", write_buffer_size),
+  printf("                 Options.prefix_extractor: %s\n",
+      prefix_extractor == nullptr ? "nullptr" : prefix_extractor->Name());
+  printf("            Options.bucket_count: %lu\n", bucket_count);
+  printf("  Options.memtable_insert_with_hint_prefix_extractor: %s\n",
+                   memtable_insert_with_hint_prefix_extractor == nullptr
+                       ? "nullptr"
+                       : memtable_insert_with_hint_prefix_extractor->Name());
+  printf(".       Options.disable_auto_compactions: %d\n", disable_auto_compactions);
+}  // ColumnFamilyOptions::DumpMemTable
 
 void Options::Dump(Logger* log) const {
   DBOptions::Dump(log);

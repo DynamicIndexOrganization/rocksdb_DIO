@@ -94,21 +94,34 @@ class VectorRep : public MemTableRep {
   // Return an iterator over the keys in this representation.
   MemTableRep::Iterator* GetIterator(Arena* arena) override;
 
- private:
+ protected:
   friend class Iterator;
   using Bucket = std::vector<const char*>;
   std::shared_ptr<Bucket> bucket_;
   mutable port::RWMutex rwlock_;
-  bool immutable_;
+  // DIONOTE: This variable has been elevated to MemTableRep
+  // bool immutable_;
   bool sorted_;
   const KeyComparator& compare_;
 };
 
 void VectorRep::Insert(KeyHandle handle) {
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(VECTOR_INSERT) != nullptr && bucket_ != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
   auto* key = static_cast<char*>(handle);
   WriteLock l(&rwlock_);
   assert(!immutable_);
   bucket_->push_back(key);
+#ifdef DIO_LATENCY_COLLECT
+  if (GetOpLatencyCollect(VECTOR_INSERT) != nullptr && bucket_ != nullptr) {
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now() - start);
+    GetOpLatencyCollect(VECTOR_INSERT)->AddStat((int)bucket_->size(), (int)duration.count());
+  }
+#endif
 }
 
 // Returns true iff an entry that compares equal to key is in the collection.
@@ -133,10 +146,10 @@ VectorRep::VectorRep(const KeyComparator& compare, Allocator* allocator,
                      size_t count)
     : MemTableRep(allocator),
       bucket_(new Bucket()),
-      immutable_(false),
       sorted_(false),
       compare_(compare) {
   bucket_.get()->reserve(count);
+  type = VECTOR_TYPE;
 }
 
 VectorRep::Iterator::Iterator(class VectorRep* vrep,
@@ -161,10 +174,24 @@ void VectorRep::Iterator::DoSort() const {
     sorted_ = true;
   }
   if (!sorted_) {
+#ifdef DIO_LATENCY_COLLECT
+    std::chrono::_V2::system_clock::time_point start;
+    if (GetOpLatencyCollect(OpLatencyType::VECTOR_SORT) != nullptr && bucket_ != nullptr) {
+      start = std::chrono::high_resolution_clock::now();
+    }
+#endif
     std::sort(bucket_->begin(), bucket_->end(),
               stl_wrappers::Compare(compare_));
     cit_ = bucket_->begin();
     sorted_ = true;
+
+#ifdef DIO_LATENCY_COLLECT
+    if (GetOpLatencyCollect(OpLatencyType::VECTOR_SORT) != nullptr && bucket_ != nullptr) {
+      auto stop = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+      GetOpLatencyCollect(OpLatencyType::VECTOR_SORT)->AddStat((int)bucket_->size(), (int)duration.count());
+    }
+#endif
   }
   assert(sorted_);
   assert(vrep_ == nullptr || vrep_->sorted_);
@@ -191,6 +218,7 @@ void VectorRep::Iterator::Next() {
     return;
   }
   ++cit_;
+  stat.numRecordScaned++;
 }
 
 // Advances to the previous position.
@@ -205,6 +233,7 @@ void VectorRep::Iterator::Prev() {
   } else {
     --cit_;
   }
+  stat.numRecordScaned++;
 }
 
 // Advance to the first entry with a key >= target
@@ -219,6 +248,10 @@ void VectorRep::Iterator::Seek(const Slice& user_key,
                             return compare_(a, b) < 0;
                           })
              .first;
+  stat.scanForward = true;
+  if (vrep_ == nullptr && !internal_) {
+    stat.RecordScanQuery();
+  }
 }
 
 // Advance to the first entry with a key <= target
@@ -232,6 +265,7 @@ void VectorRep::Iterator::SeekForPrev(const Slice& /*user_key*/,
 void VectorRep::Iterator::SeekToFirst() {
   DoSort();
   cit_ = bucket_->begin();
+  stat.scanForward = true;
 }
 
 // Position at the last entry in collection.
@@ -242,6 +276,7 @@ void VectorRep::Iterator::SeekToLast() {
   if (bucket_->size() != 0) {
     --cit_;
   }
+  stat.scanForward = false;
 }
 
 void VectorRep::Get(const LookupKey& k, void* callback_args,
@@ -249,6 +284,13 @@ void VectorRep::Get(const LookupKey& k, void* callback_args,
   rwlock_.ReadLock();
   VectorRep* vector_rep;
   std::shared_ptr<Bucket> bucket;
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(OpLatencyType::VECTOR_COPY) != nullptr && bucket != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
+
   if (immutable_) {
     vector_rep = this;
   } else {
@@ -256,7 +298,15 @@ void VectorRep::Get(const LookupKey& k, void* callback_args,
     bucket.reset(new Bucket(*bucket_));  // make a copy
   }
   VectorRep::Iterator iter(vector_rep, immutable_ ? bucket_ : bucket, compare_);
+  iter.SetInternal(true);
   rwlock_.ReadUnlock();
+#ifdef DIO_LATENCY_COLLECT
+  if (GetOpLatencyCollect(OpLatencyType::VECTOR_COPY) != nullptr && bucket != nullptr) {
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    GetOpLatencyCollect(OpLatencyType::VECTOR_COPY)->AddStat((int)bucket->size(), (int)duration.count());
+  }
+#endif
 
   for (iter.Seek(k.user_key(), k.memtable_key().data());
        iter.Valid() && callback_func(callback_args, iter.key()); iter.Next()) {
@@ -268,7 +318,15 @@ MemTableRep::Iterator* VectorRep::GetIterator(Arena* arena) {
   if (arena != nullptr) {
     mem = arena->AllocateAligned(sizeof(Iterator));
   }
+  if (wasConverted) {
+      // return nullptr to notify the upper caller that this memtable is already converted
+    return nullptr;
+  }
   ReadLock l(&rwlock_);
+  if (wasConverted) {
+      // return nullptr to notify the upper caller that this memtable is already converted
+    return nullptr;
+  }
   // Do not sort here. The sorting would be done the first time
   // a Seek is performed on the iterator.
   if (immutable_) {
@@ -280,6 +338,11 @@ MemTableRep::Iterator* VectorRep::GetIterator(Arena* arena) {
   } else {
     std::shared_ptr<Bucket> tmp;
     tmp.reset(new Bucket(*bucket_));  // make a copy
+    if (wasConverted) {
+      // return nullptr to notify the upper caller that this memtable is already converted
+      delete tmp.get();
+      return nullptr;
+    }
     if (arena == nullptr) {
       return new Iterator(nullptr, tmp, compare_);
     } else {
@@ -296,6 +359,7 @@ static std::unordered_map<std::string, OptionTypeInfo> vector_rep_table_info = {
 };
 
 VectorRepFactory::VectorRepFactory(size_t count) : count_(count) {
+  type = VECTOR_TYPE;
   RegisterOptions("VectorRepFactoryOptions", &count_, &vector_rep_table_info);
 }
 
@@ -304,4 +368,5 @@ MemTableRep* VectorRepFactory::CreateMemTableRep(
     const SliceTransform*, Logger* /*logger*/) {
   return new VectorRep(compare, allocator, count_);
 }
+
 }  // namespace ROCKSDB_NAMESPACE

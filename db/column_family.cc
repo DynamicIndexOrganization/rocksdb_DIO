@@ -531,7 +531,9 @@ ColumnFamilyData::ColumnFamilyData(
     BlockCacheTracer* const block_cache_tracer,
     const std::shared_ptr<IOTracer>& io_tracer, const std::string& db_id,
     const std::string& db_session_id)
-    : id_(id),
+    : mem_(nullptr),
+      super_version_(nullptr),
+      id_(id),
       name_(name),
       dummy_versions_(_dummy_versions),
       current_(nullptr),
@@ -546,11 +548,9 @@ ColumnFamilyData::ColumnFamilyData(
       is_delete_range_supported_(
           cf_options.table_factory->IsDeleteRangeSupported()),
       write_buffer_manager_(write_buffer_manager),
-      mem_(nullptr),
       imm_(ioptions_.min_write_buffer_number_to_merge,
            ioptions_.max_write_buffer_number_to_maintain,
            ioptions_.max_write_buffer_size_to_maintain),
-      super_version_(nullptr),
       super_version_number_(0),
       local_sv_(new ThreadLocalPtr(&SuperVersionUnrefHandle)),
       next_(nullptr),
@@ -1155,7 +1155,10 @@ uint64_t ColumnFamilyData::GetLiveSstFilesSize() const {
 }
 
 MemTable* ColumnFamilyData::ConstructNewMemtable(
-    const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq) {
+    const MutableCFOptions& mutable_cf_options, SequenceNumber earliest_seq, bool updateNumEntries) {
+  if (curGlobalStat != nullptr && updateNumEntries) {
+    curGlobalStat->curMemTableNumEntries = this->mem_->NumEntries();
+  }
   return new MemTable(internal_comparator_, ioptions_, mutable_cf_options,
                       write_buffer_manager_, earliest_seq, id_);
 }
@@ -1168,6 +1171,108 @@ void ColumnFamilyData::CreateNewMemtable(SequenceNumber earliest_seq) {
   // GetLatestMutableCFOptions
   SetMemtable(ConstructNewMemtable(GetLatestMutableCFOptions(), earliest_seq));
   mem_->Ref();
+}
+
+Status ColumnFamilyData::ConvertCurrentMemtable(MutableCFOptions mutable_cf_options_copy) {
+  Status s;
+  MemTable* new_mem = ConstructNewMemtable(mutable_cf_options_copy,
+                                      /*earliest_seq=*/kMinUnCommittedSeq, false);
+  // if new_mem has the same data structure with the existing one, don't convert the current one
+  if (new_mem != nullptr && new_mem->GetTable()->type != mem_->GetTable()->type) {
+    s = ConvertMemtable(mem(), new_mem);
+
+    // After conversion, set the new mem as the in-use memtable of the current cfd
+    // two refs: one for memtable creation, one for super version
+    MemTable *curTable = mem();
+    curTable->Unref();
+    curTable->Unref();
+    new_mem->Ref();
+    new_mem->Ref();
+    new_mem->SetID(curTable->GetID());
+    mem_ = new_mem;
+    super_version_->mem = new_mem;
+    // Set the before-conversion memtable as old memtable, to be deleted later.
+    new_mem->SetOldMemTable(curTable);
+  } else {
+    // otherwise, delete new_mem
+    delete new_mem;
+  }
+
+  return s;
+}
+
+Status ColumnFamilyData::ConvertImmutableMemtablesIfNeeded(MutableCFOptions mutable_cf_options_copy){
+  Status s;
+  (void)mutable_cf_options_copy;
+  const auto& memlist = imm()->current_->memlist_;
+  // if we only have one immutable memtable and auto compaction is enabled,
+  //     don't convert it as it should be picked-up by compaction thread soon
+  if (memlist.size() == 1 && !mutable_cf_options_copy.disable_auto_compactions) {
+    return s;
+  }
+
+  // Otherwise, traverse through the immutable list here
+  auto it = imm()->current_->memlist_.begin();
+  for (;it != memlist.end(); ++it) {
+    ReadOnlyMemTable* m = *it;
+    if (!m->flush_in_progress_) {
+      // if the immutable memtable is flush_in_progress, don't convert it.
+      continue;
+    } else {
+      // now do the conversion, but check for conversion in the middle
+      MemTable* new_mem = ConstructNewMemtable(mutable_cf_options_copy,
+                                          /*earliest_seq=*/kMinUnCommittedSeq, false);
+      if (new_mem != nullptr && new_mem->GetTable()->type != ((MemTable *)m)->GetTable()->type) {
+        MemTable* table = (MemTable*)m;
+        s = ConvertMemtable(table, new_mem);
+        if (table->flush_in_progress_) {
+          delete new_mem;
+          continue;
+        }
+        // After conversion, add this memtable to the old memtable
+        // all queries reading old memtable will be redirected to newMemTable after it is set.
+        // BUT!!! it will not get any new records as it is immutable. So we are safe here
+        m->newMemTable = new_mem;
+      } else if (new_mem != nullptr) {
+        delete new_mem;
+        new_mem = nullptr;
+      }
+    }
+  }
+
+  return s;
+}
+
+bool ColumnFamilyData::ShouldConvertMemtable() {
+  return mem_->ShouldSwitchMemtableRep();
+}
+
+Status ColumnFamilyData::ConvertMemtable(MemTable* old_mem, MemTable* new_mem) {
+  Status s;
+  auto iter = old_mem->GetTable()->GetIterator();
+  int count = 0;
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    SequenceNumber seq;
+    ValueType t;
+    char *key = nullptr;
+    char *value = nullptr;
+    uint32_t keyLength = 0;
+    uint32_t valueLength = 0;
+    new_mem->ParseEntry(iter->key(), seq, t, key, value, keyLength, valueLength);
+
+    Slice keySlice(key, keyLength);
+    Slice valueSlice(value, valueLength);
+    new_mem->Add(seq, t, keySlice, valueSlice, nullptr,
+      true /* convertMode does not udpate Seq number and flush state */);
+    count++;
+  }
+
+  // we need to update sequence number of the new memtable according to the info of the old one
+  new_mem->UpdateSequenceNumber(old_mem->GetFirstSequenceNumber(), old_mem->GetEarliestSequenceNumber());
+
+  fprintf(stderr, "DIODEBUG: MemtableConversion completes. %d records are transfered from old memtable %p (type %u) to new memtable %p (type %u)\n",
+    count, old_mem->GetTable(), old_mem->GetTable()->type, new_mem->GetTable(), new_mem->GetTable()->type);
+  return s;
 }
 
 bool ColumnFamilyData::NeedsCompaction() const {

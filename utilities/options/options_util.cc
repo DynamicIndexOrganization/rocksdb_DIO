@@ -27,6 +27,7 @@ Status LoadOptionsFromFile(const ConfigOptions& config_options,
   const std::vector<ColumnFamilyOptions>& cf_opts = *parser.cf_opts();
   cf_descs->clear();
   for (size_t i = 0; i < cf_opts.size(); ++i) {
+    cf_opts[i].DumpMemtable();
     cf_descs->push_back({cf_names[i], cf_opts[i]});
     if (cache != nullptr) {
       TableFactory* tf = cf_opts[i].table_factory.get();

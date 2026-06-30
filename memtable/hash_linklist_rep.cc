@@ -183,6 +183,8 @@ class HashLinkListRep : public MemTableRep {
   MemTableRep::Iterator* GetDynamicPrefixIterator(
       Arena* arena = nullptr) override;
 
+ const SliceTransform* GetTransformer() override {return transform_;}
+
  private:
   friend class DynamicIterator;
 
@@ -515,6 +517,7 @@ HashLinkListRep::HashLinkListRep(
       logger_(logger),
       bucket_entries_logging_threshold_(bucket_entries_logging_threshold),
       if_log_bucket_dist_when_flash_(if_log_bucket_dist_when_flash) {
+  type = HASH_LINKED_LIST_TYPE;
   char* mem = allocator_->AllocateAligned(sizeof(Pointer) * bucket_size,
                                           huge_page_tlb_size, logger);
 
@@ -876,6 +879,7 @@ class HashLinkListRepFactory : public MemTableRepFactory {
                                   size_t huge_page_tlb_size,
                                   int bucket_entries_logging_threshold,
                                   bool if_log_bucket_dist_when_flash) {
+    type = HASH_LINKED_LIST_TYPE;
     options_.bucket_count = bucket_count;
     options_.threshold_use_skiplist = threshold_use_skiplist;
     options_.huge_page_tlb_size = huge_page_tlb_size;

@@ -212,6 +212,10 @@ class InternalIteratorBase : public Cleanable {
   // used by MergingIterator and LevelIterator for now.
   virtual bool IsDeleteRangeSentinelKey() const { return false; }
 
+  virtual bool NullIter() const {
+    return false;
+  }
+
  protected:
   void SeekForPrevImpl(const Slice& target, const CompareInterface* cmp) {
     Seek(target);

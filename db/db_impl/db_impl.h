@@ -1708,6 +1708,8 @@ class DBImpl : public DB {
                                           Status& status, bool& stop_replay,
                                           WriteBatch& batch);
 
+  Status GetMemTableSizeInCF(ColumnFamilyHandle* column_family, size_t &size) override;
+
  private:
   friend class DB;
   friend class ErrorHandler;

@@ -42,6 +42,8 @@ class HashSkipListRep : public MemTableRep {
   MemTableRep::Iterator* GetDynamicPrefixIterator(
       Arena* arena = nullptr) override;
 
+  const SliceTransform* GetTransformer() override {return transform_;}
+
  private:
   friend class DynamicIterator;
   using Bucket = SkipList<const char*, const MemTableRep::KeyComparator&>;
@@ -78,9 +80,9 @@ class HashSkipListRep : public MemTableRep {
 
   class Iterator : public MemTableRep::Iterator {
    public:
-    explicit Iterator(Bucket* list, bool own_list = true,
+    explicit Iterator(Bucket* list, const HashSkipListRep &rep, bool own_list = true,
                       Arena* arena = nullptr)
-        : list_(list), iter_(list), own_list_(own_list), arena_(arena) {}
+        : list_(list), iter_(list), own_list_(own_list), arena_(arena), hashSkipListRep_(rep) {}
 
     ~Iterator() override {
       // if we own the list, we should also delete it
@@ -105,6 +107,7 @@ class HashSkipListRep : public MemTableRep {
     void Next() override {
       assert(Valid());
       iter_.Next();
+      stat.numRecordScaned++;
     }
 
     // Advances to the previous position.
@@ -112,6 +115,7 @@ class HashSkipListRep : public MemTableRep {
     void Prev() override {
       assert(Valid());
       iter_.Prev();
+      stat.numRecordScaned++;
     }
 
     // Advance to the first entry with a key >= target
@@ -121,6 +125,10 @@ class HashSkipListRep : public MemTableRep {
                                       ? memtable_key
                                       : EncodeKey(&tmp_, internal_key);
         iter_.Seek(encoded_key);
+        stat.scanForward = true;
+        if (!hashSkipListRep_.immutable_ && !internal_) {
+          stat.RecordScanQuery();
+        }
       }
     }
 
@@ -136,6 +144,7 @@ class HashSkipListRep : public MemTableRep {
     void SeekToFirst() override {
       if (list_ != nullptr) {
         iter_.SeekToFirst();
+        stat.scanForward = true;
       }
     }
 
@@ -144,6 +153,7 @@ class HashSkipListRep : public MemTableRep {
     void SeekToLast() override {
       if (list_ != nullptr) {
         iter_.SeekToLast();
+        stat.scanForward = false;
       }
     }
 
@@ -156,6 +166,7 @@ class HashSkipListRep : public MemTableRep {
       list_ = list;
       iter_.SetList(list);
       own_list_ = false;
+      stat.ResetValue();
     }
 
    private:
@@ -168,12 +179,13 @@ class HashSkipListRep : public MemTableRep {
     bool own_list_;
     std::unique_ptr<Arena> arena_;
     std::string tmp_;  // For passing to EncodeKey
+    const HashSkipListRep &hashSkipListRep_;
   };
 
   class DynamicIterator : public HashSkipListRep::Iterator {
    public:
     explicit DynamicIterator(const HashSkipListRep& memtable_rep)
-        : HashSkipListRep::Iterator(nullptr, false),
+        : HashSkipListRep::Iterator(nullptr, memtable_rep, false),
           memtable_rep_(memtable_rep) {}
 
     // Advance to the first entry with a key >= target
@@ -239,6 +251,7 @@ HashSkipListRep::HashSkipListRep(const MemTableRep::KeyComparator& compare,
       transform_(transform),
       compare_(compare),
       allocator_(allocator) {
+  type = HASH_SKIP_LIST_TYPE;
   auto mem =
       allocator->AllocateAligned(sizeof(std::atomic<void*>) * bucket_size);
   buckets_ = new (mem) std::atomic<Bucket*>[bucket_size];
@@ -252,6 +265,12 @@ HashSkipListRep::~HashSkipListRep() = default;
 
 HashSkipListRep::Bucket* HashSkipListRep::GetInitializedBucket(
     const Slice& transformed) {
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(HASH_PROBE) != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
   size_t hash = GetHash(transformed);
   auto bucket = GetBucket(hash);
   if (bucket == nullptr) {
@@ -260,6 +279,13 @@ HashSkipListRep::Bucket* HashSkipListRep::GetInitializedBucket(
                                skiplist_branching_factor_);
     buckets_[hash].store(bucket, std::memory_order_release);
   }
+#ifdef DIO_LATENCY_COLLECT
+  auto stop = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+  if (GetOpLatencyCollect(HASH_PROBE) != nullptr) {
+      GetOpLatencyCollect(HASH_PROBE)->AddStat((int)bucket_size_, (int)duration.count());
+  }
+#endif
   return bucket;
 }
 
@@ -288,6 +314,7 @@ void HashSkipListRep::Get(const LookupKey& k, void* callback_args,
   auto bucket = GetBucket(transformed);
   if (bucket != nullptr) {
     Bucket::Iterator iter(bucket);
+    iter.SetInternal(true);
     for (iter.Seek(k.memtable_key().data());
          iter.Valid() && callback_func(callback_args, iter.key());
          iter.Next()) {
@@ -300,6 +327,12 @@ MemTableRep::Iterator* HashSkipListRep::GetIterator(Arena* arena) {
   Arena* new_arena = new Arena(allocator_->BlockSize());
   auto list = new Bucket(compare_, new_arena);
   for (size_t i = 0; i < bucket_size_; ++i) {
+    if (wasConverted) {
+      // return nullptr to notify the upper caller that this memtable is already converted
+      delete new_arena;
+      delete list;
+      return nullptr;
+    }
     auto bucket = GetBucket(i);
     if (bucket != nullptr) {
       Bucket::Iterator itr(bucket);
@@ -309,10 +342,10 @@ MemTableRep::Iterator* HashSkipListRep::GetIterator(Arena* arena) {
     }
   }
   if (arena == nullptr) {
-    return new Iterator(list, true, new_arena);
+    return new Iterator(list, *this, true, new_arena);
   } else {
     auto mem = arena->AllocateAligned(sizeof(Iterator));
-    return new (mem) Iterator(list, true, new_arena);
+    return new (mem) Iterator(list, *this, true, new_arena);
   }
 }
 
@@ -350,6 +383,7 @@ class HashSkipListRepFactory : public MemTableRepFactory {
  public:
   explicit HashSkipListRepFactory(size_t bucket_count, int32_t skiplist_height,
                                   int32_t skiplist_branching_factor) {
+    type = HASH_SKIP_LIST_TYPE;
     options_.bucket_count = bucket_count;
     options_.skiplist_height = skiplist_height;
     options_.skiplist_branching_factor = skiplist_branching_factor;
@@ -364,6 +398,10 @@ class HashSkipListRepFactory : public MemTableRepFactory {
 
   static const char* kClassName() { return "HashSkipListRepFactory"; }
   static const char* kNickName() { return "prefix_hash"; }
+
+  void PrintMemTableType() override {
+    fprintf(stderr, "New Memtable is HashSkipList\n");
+  }
 
   const char* Name() const override { return kClassName(); }
   const char* NickName() const override { return kNickName(); }

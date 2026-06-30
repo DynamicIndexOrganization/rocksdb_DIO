@@ -400,6 +400,7 @@ struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   explicit ColumnFamilyOptions(const Options& options);
 
   void Dump(Logger* log) const;
+  void DumpMemtable() const;
 };
 
 enum class WALRecoveryMode : char {
@@ -1773,7 +1774,8 @@ struct ReadOptions {
   // If async_io is enabled, RocksDB will prefetch some of data asynchronously.
   // RocksDB apply it if reads are sequential and its internal automatic
   // prefetching.
-  bool async_io = false;
+  // DIONOTE: Default this to true to avoid additional overhead
+  bool async_io = true;
 
   // Experimental
   //
@@ -1850,7 +1852,8 @@ struct ReadOptions {
   // this option.
   // If true when calling Get(), we also skip prefix bloom when reading from
   // block based table, which only affects Get() performance.
-  bool total_order_seek = false;
+  // DIONOTE: Default this to true to enable correct scanning on HashSkipList memtable
+  bool total_order_seek = true;
 
   // When true, by default use total_order_seek = true, and RocksDB can
   // selectively enable prefix seek mode if won't generate a different result
@@ -2018,7 +2021,8 @@ struct WriteOptions {
   // you disable write-ahead logs, you must create backups with
   // flush_before_backup=true to avoid losing unflushed memtable data.
   // Default: false
-  bool disableWAL = false;
+  // DIONOTE: Set this to be true to avoid performance bottleneck triggered by WAL
+  bool disableWAL = true;
 
   // If true and if user is trying to write to column families that don't exist
   // (they were dropped),  ignore the write (don't return an error). If there

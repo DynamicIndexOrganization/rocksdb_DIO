@@ -64,6 +64,10 @@ struct ImmutableMemTableOptions {
   uint32_t protection_bytes_per_key;
   bool allow_data_in_errors;
   bool paranoid_memory_checks;
+  bool enable_dynamic_index_organization;
+  size_t bucket_count;
+  size_t skiplist_branching_factor;
+  double dynamic_index_organization_cost_adjust_factor;
 };
 
 // Batched counters to updated when inserting keys in one write batch.
@@ -496,15 +500,23 @@ class ReadOnlyMemTable {
     return false;
   }
 
- protected:
-  friend class MemTableList;
+  virtual ReadOnlyMemTable *GetOldMemTable() {
+    return nullptr;
+  }
 
-  int refs_{0};
+  // Save converted memtable here. Any read request will
+  // be re-direct to this memtable to process.
+  ReadOnlyMemTable *newMemTable = nullptr;
 
   // These are used to manage memtable flushes to storage
   bool flush_in_progress_{false};  // started the flush
   bool flush_completed_{false};    // finished the flush
   uint64_t file_number_{0};
+
+ protected:
+  friend class MemTableList;
+
+  int refs_{0};
 
   // The updates to be applied to the transaction log when this
   // memtable is flushed to storage.
@@ -553,6 +565,16 @@ class MemTable final : public ReadOnlyMemTable {
   MemTable& operator=(const MemTable&) = delete;
 
   ~MemTable() override;
+
+  static MemTableRep* CreateTableInMemory(const KeyComparator &comparator, ConcurrentArena *arena,
+    const MutableCFOptions& mutable_cf_options, const ImmutableOptions& ioptions, uint32_t column_family_id);
+  static void LoadLatencyPredictModels();
+  static void CreateMemtableFactoryArray(const ImmutableOptions& ioptions);
+  static double PredictVectorMemtableCost(MemTableStat &allMemStat, bool printOut = true);
+  static double PredictSkipListMemtableCost(MemTableStat &allMemStat,  size_t skiplist_branching_factor, bool printOut = true);
+  static double PredictHashSkipListMemtableCost(MemTableStat &allMemStat, size_t bucket_count, size_t skiplist_branching_factor, bool printOut = true);
+  bool NeedSwitchNewMemtable();
+  void PrintTimeToLive(std::string reason);
 
   const char* Name() const override { return "MemTable"; }
 
@@ -625,6 +647,7 @@ class MemTable final : public ReadOnlyMemTable {
   // The next attempt should try a larger value for `seq`.
   Status Add(SequenceNumber seq, ValueType type, const Slice& key,
              const Slice& value, const ProtectionInfoKVOS64* kv_prot_info,
+             bool convertMode = false,
              bool allow_concurrent = false,
              MemTablePostProcessInfo* post_process_info = nullptr,
              void** hint = nullptr);
@@ -806,6 +829,8 @@ class MemTable final : public ReadOnlyMemTable {
   // Returns a heuristic flush decision
   bool ShouldFlushNow();
 
+  bool ShouldSwitchMemtableRep();
+
   // Updates `fragmented_range_tombstone_list_` that will be used to serve reads
   // when this memtable becomes an immutable memtable (in some
   // MemtableListVersion::memlist_). Should be called when this memtable is
@@ -825,7 +850,39 @@ class MemTable final : public ReadOnlyMemTable {
                                     uint32_t protection_bytes_per_key,
                                     bool allow_data_in_errors = false);
 
- private:
+  MemTableRep *GetTable() { return table_.get();}
+  MemTableRep *SetTable(MemTableRep * memNew) {
+    MemTableRep *curTable = table_.get();
+    table_.reset(memNew);
+    return curTable;
+  }
+
+  // Give an encoded entry, parse its content
+  // Refer to comment in Memtable::Add for the structure of each KV entry
+  void ParseEntry(const char *entry, SequenceNumber &s, ValueType &t, char *&key, char *&value, uint32_t &keyLen, uint32_t &valueLen);
+
+  void UpdateSequenceNumber(SequenceNumber firstSeq, SequenceNumber earliestSeq);
+
+  void SetOldMemTable(MemTable *oldMem) {
+    assert(oldMemTable == nullptr);
+    oldMemTable = oldMem;
+    oldMem->table_->wasConverted = true;
+  }
+
+  ReadOnlyMemTable *GetOldMemTable() override {
+    return oldMemTable;
+  }
+
+  // Used for searching keys in converted immutable memtable;
+  void GetFromTable(const LookupKey& key,
+                  SequenceNumber max_covering_tombstone_seq, bool do_merge,
+                  ReadCallback* callback, bool* is_blob_index,
+                  std::string* value, PinnableWideColumns* columns,
+                  std::string* timestamp, Status* s,
+                  MergeContext* merge_context, SequenceNumber* seq,
+                  bool* found_final_value, bool* merge_in_progress);
+
+  private:
   enum FlushStateEnum { FLUSH_NOT_REQUESTED, FLUSH_REQUESTED, FLUSH_SCHEDULED };
 
   friend class MemTableIterator;
@@ -903,18 +960,16 @@ class MemTable final : public ReadOnlyMemTable {
   // Otherwise, this field just contains an empty Slice.
   Slice newest_udt_;
 
+  std::chrono::time_point<std::chrono::high_resolution_clock> create_time;
+
+  // oldMemTable represents the old memtable that this memtable was converted from
+  // If it is a valid pointer, we should delete it when we delete the current memtable.
+  MemTable *oldMemTable = nullptr;
+
   // Updates flush_state_ using ShouldFlushNow()
   void UpdateFlushState();
 
   void UpdateOldestKeyTime();
-
-  void GetFromTable(const LookupKey& key,
-                    SequenceNumber max_covering_tombstone_seq, bool do_merge,
-                    ReadCallback* callback, bool* is_blob_index,
-                    std::string* value, PinnableWideColumns* columns,
-                    std::string* timestamp, Status* s,
-                    MergeContext* merge_context, SequenceNumber* seq,
-                    bool* found_final_value, bool* merge_in_progress);
 
   // Always returns non-null and assumes certain pre-checks (e.g.,
   // is_range_del_table_empty_) are done. This is only valid during the lifetime

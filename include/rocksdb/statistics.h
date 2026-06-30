@@ -12,6 +12,13 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <fstream>
+// #include <algorithm>
+#include <iostream>
+#include <mutex>
+#include <cmath>
+#include <chrono>
+#include <x86intrin.h>
 
 #include "rocksdb/customizable.h"
 #include "rocksdb/status.h"
@@ -709,6 +716,371 @@ enum StatsLevel : uint8_t {
   // If getting time is expensive on the platform to run, it can
   // reduce scalability to more threads, especially for writes.
   kAll,
+};
+
+class TSCClock {
+public:
+    static uint64_t now_ns() {
+        uint64_t t = __rdtsc();
+
+        maybe_recalibrate(t);
+
+        uint64_t base_tsc = base_tsc_.load(std::memory_order_relaxed);
+        uint64_t base_ns  = base_ns_.load(std::memory_order_relaxed);
+        double ns_per_cycle = ns_per_cycle_.load(std::memory_order_relaxed);
+
+        return base_ns + (uint64_t)((t - base_tsc) * ns_per_cycle);
+    }
+
+    static inline uint64_t elapsed_ns(uint64_t start_ns) {
+      return TSCClock::now_ns() - start_ns;
+    }
+
+private:
+
+    static void maybe_recalibrate(uint64_t now_tsc) {
+        uint64_t last = last_calibration_tsc_.load(std::memory_order_relaxed);
+
+        if (now_tsc - last < recalibration_cycles_) {
+            return;
+        }
+
+        recalibrate();
+    }
+
+    static void recalibrate() {
+
+        auto tp = std::chrono::high_resolution_clock::now();
+        uint64_t tsc = __rdtsc();
+
+        uint64_t ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                tp.time_since_epoch()).count();
+
+        uint64_t prev_tsc = base_tsc_.load(std::memory_order_relaxed);
+        uint64_t prev_ns  = base_ns_.load(std::memory_order_relaxed);
+
+        if (prev_tsc != 0) {
+            double new_ratio =
+                (double)(ns - prev_ns) / (double)(tsc - prev_tsc);
+
+            ns_per_cycle_.store(new_ratio, std::memory_order_relaxed);
+        }
+
+        base_tsc_.store(tsc, std::memory_order_relaxed);
+        base_ns_.store(ns, std::memory_order_relaxed);
+
+        last_calibration_tsc_.store(tsc, std::memory_order_relaxed);
+    }
+
+private:
+
+    static inline std::atomic<uint64_t> base_tsc_{0};
+    static inline std::atomic<uint64_t> base_ns_{0};
+    static inline std::atomic<uint64_t> last_calibration_tsc_{0};
+    static inline std::atomic<double>   ns_per_cycle_{1.0};
+
+    static constexpr uint64_t recalibration_cycles_ =
+        5300ULL * 1000 * 1000;   // roughly ~5.3B cycles (~1 sec on 5.3GHz CPU)
+};
+
+enum MemTableType : int {
+  SKIP_LIST_TYPE = 0,
+  VECTOR_TYPE = 1,
+  HASH_SKIP_LIST_TYPE = 2,
+  HASH_LINKED_LIST_TYPE = 3,
+  MAX_MEM_TABLE_TYPE = 4
+};
+
+// We do not support hash linked list now due to implementation complexity on range query
+// also, due to its similarity with HashSkipList.
+const MemTableType MAX_SUPPORTED_MEM_TABLE_TYPE = HASH_LINKED_LIST_TYPE;
+
+struct MemTableStat {
+  MemTableType type;
+  std::atomic<uint64_t> numInsertRecords;
+  std::atomic<uint64_t> numPointRead;
+  std::atomic<uint64_t> numRangeQuery;
+  std::atomic<uint64_t> numEntriesLastMem;
+  uint64_t curMemTableNumEntries;
+  uint64_t lastCheckTime;
+  uint64_t creationTime;
+  MemTableType nextMemTableType = MAX_MEM_TABLE_TYPE;
+
+
+  MemTableStat() {
+    Init(MAX_MEM_TABLE_TYPE);
+    numEntriesLastMem = 0;
+    creationTime = TSCClock::now_ns();
+  }
+
+  void Init(MemTableType t) {
+    type = t;
+    numInsertRecords = 0;
+    numPointRead = 0;
+    numRangeQuery = 0;
+    lastCheckTime = TSCClock::now_ns();
+    curMemTableNumEntries = 0;
+  }
+
+  inline void SetCheckTime() {
+    lastCheckTime = TSCClock::now_ns();
+  }
+
+  inline uint64_t GetElapsedTime() {
+    uint64_t curTime = TSCClock::now_ns();
+    return (curTime - creationTime) / 1000000000;
+  }
+
+  inline bool CheckTimeExpired(uint64_t timeLimit) {
+    auto duration = TSCClock::elapsed_ns(lastCheckTime);
+    return (duration > timeLimit);
+  }
+
+  inline bool CheckQueryNumber(double queryCount) {
+    return ((numInsertRecords.load(std::memory_order_relaxed) +
+              numPointRead.load(std::memory_order_relaxed) +
+              numRangeQuery.load(std::memory_order_relaxed)) > queryCount);
+  }
+
+  inline double TotalQueryNumber() {
+    return (numInsertRecords.load(std::memory_order_relaxed) +
+              numPointRead.load(std::memory_order_relaxed) +
+              numRangeQuery.load(std::memory_order_relaxed));
+  }
+
+  inline bool WorkloadStarted() {
+    return numInsertRecords.load(std::memory_order_relaxed) != 0 ||
+            numPointRead.load(std::memory_order_relaxed) != 0 ||
+            numRangeQuery.load(std::memory_order_relaxed) != 0;
+  }
+  inline bool IsInsertOnly() {
+    return numInsertRecords.load(std::memory_order_relaxed) != 0 &&
+            numPointRead.load(std::memory_order_relaxed) == 0 &&
+            numRangeQuery.load(std::memory_order_relaxed) == 0;
+  }
+  inline bool IsFullyMixedWorkload() {
+    return numInsertRecords.load(std::memory_order_relaxed) != 0 &&
+            numPointRead.load(std::memory_order_relaxed) != 0 &&
+            numRangeQuery.load(std::memory_order_relaxed) != 0;
+  }
+};
+
+// curGlobalStat is used to track the stat of the current memtable
+extern MemTableStat *curGlobalStat;
+
+enum OpLatencyType : int {
+  VECTOR_INSERT = 0,
+  VECTOR_COPY = 1,
+  VECTOR_SORT = 2,
+  INLINE_SKIPLIST_SEARCH = 3,
+  INLINE_SKIPLIST_INSERT = 4,
+  SKIPLIST_SEARCH = 5,
+  SKIPLIST_INSERT = 6,
+  HASH_PROBE = 7,
+  MAX_OP_LATENCY_TYPE = 8
+};
+
+extern std::string GetOpLatencyTypeString(OpLatencyType type);
+
+#ifdef DIO_LATENCY_COLLECT
+class OpLatencyCollect {
+public:
+  OpLatencyType type;
+  std::vector<std::pair<int, int>> stat;
+  bool needFlush = true;
+  std::mutex l;
+
+  void AddStat(int first, int second) {
+    std::lock_guard<std::mutex> lock(l);
+    std::pair<int,int> p = {first, second};
+    stat.emplace_back(p);
+    if (!needFlush)
+      needFlush = true;
+  }
+
+  void Flush(std::string filename) {
+    std::ofstream out(filename);
+    if (!out) {
+        throw std::runtime_error("Failed to open file: " + filename);
+    }
+
+    // first, flush type
+    out<<GetOpLatencyTypeString(type)<<std::endl;
+
+    // second, flush data size
+    std::lock_guard<std::mutex> lock(l);
+    out <<stat.size()<<std::endl;
+
+    // finally, flush all stat entries
+    for (auto p: stat) {
+      out << p.first <<","<<p.second<<std::endl;
+    }
+    needFlush = false;
+
+  }
+
+  OpLatencyCollect(OpLatencyType type_, bool needFlush_)
+    :type(type_), needFlush(needFlush_)
+    {}
+
+  ~OpLatencyCollect() {
+    if (needFlush) {
+      std::string path = std::getenv("LATENCY_SAMPLE_STORAGE_PATH");
+      if (path == "") {
+        printf("Failed to load latency storage path in env. Please define the environment variable LATENCY_SAMPLE_STORAGE_PATH\n");
+        return;
+      }
+      path.append("/curOpLatencyCollect_");
+      path.append(GetOpLatencyTypeString(type));
+      path.append(".csv");
+      Flush(path);
+    }
+  }
+};
+
+extern OpLatencyCollect *curGlobalLatencyCollect[MAX_OP_LATENCY_TYPE];
+#define GetOpLatencyCollect(type) curGlobalLatencyCollect[type]
+#endif
+
+enum LatencyModelType : int {
+  CONSTANT = 0,
+  N = 1,
+  NLOGN = 2,
+  PIECEWISE = 3,
+  MAX_MODEL_TYPE = 4,
+};
+extern std::string GetLatencyModelTypeString(LatencyModelType type);
+extern LatencyModelType GetLatencyModelTypeFromString(std::string str);
+
+class LatencyModel {
+public:
+  LatencyModelType type;
+  double a;
+  double b;
+  double c;
+
+  virtual inline double Predict(double x = 0) {
+    double value = 0;
+    switch(type) {
+      case CONSTANT:
+        return a;
+      case N:
+        value = a * x + c;
+        return (value > 0)? value:1;
+      case NLOGN:
+        value = a * x * std::log(x) + b * x + c;
+        return (value > 0)? value:1;
+      default:
+        std::cout<<"Undefined Latency Prediction model type: "<<(int)type<<std::endl;
+        break;
+    }
+
+    return 0;
+  }
+
+  LatencyModel(std::string t):
+    type(GetLatencyModelTypeFromString(t)), a(0), b(0), c(0)
+  {}
+  LatencyModel(std::string t, std::vector<double> param):
+    type(GetLatencyModelTypeFromString(t))
+  {
+    if (param.size() == 3) {
+      a = param[0];
+      b = param[1];
+      c = param[2];
+    } else if (param.size() == 2) {
+      a = param[0];
+      b = param[1];
+      c = 0;
+    } else if (param.size() == 1) {
+      a = param[0];
+      b = 0;
+      c = 0;
+    }
+  }
+
+  virtual void PrintModel(int i) {
+    OpLatencyType opType = (OpLatencyType)i;
+    if (opType == MAX_OP_LATENCY_TYPE) {
+      printf("  Type:    %s\n"
+             "  a:       %f\n"
+             "  b:       %f\n"
+             "  c:       %f\n",
+            GetLatencyModelTypeString(type).c_str(),
+            a, b, c);
+    } else {
+      printf("Operation: %s\n"
+            "  Type:    %s\n"
+            "  a:       %f\n"
+            "  b:       %f\n"
+            "  c:       %f\n",
+            GetOpLatencyTypeString((OpLatencyType)i).c_str(),
+            GetLatencyModelTypeString(type).c_str(),
+            a, b, c);
+    }
+  }
+
+  virtual ~LatencyModel() = default;
+};
+
+/*
+ * Piecewise Latency Model
+ * Within each range, we allow the user to use different models
+ * For a piecewise latency model file, it should have the following format:
+ *   Piecewise
+ *   <Model Type 1>
+ *   <Model Range 1>
+ *   <param a>
+ *   <param b>
+ *   <param c>
+ *   <Model Type 2>
+ *   <Model Range 2>
+ *   <param a>
+ *   <param b>
+ *   <param c>
+ *   <Model Type 3>
+ *   <Model Range 3>
+ *   ...
+ * 
+ * For each model, you need to have ALL three params specified EVEN THOUGH they might be zero!
+ */
+class PiecewiseLatencyModel : public LatencyModel {
+public:
+  std::vector<LatencyModel> models;
+  std::vector<double> valueRange;
+
+  PiecewiseLatencyModel(std::vector<double> &a_v, std::vector<double> &b_v, std::vector<double> &c_v, std::vector<std::string> type_v, std::vector<double> &range_v): LatencyModel("Piecewise"), valueRange(range_v) {
+    for (int i = 0; i < (int)type_v.size(); i++) {
+      std::vector<double> params{a_v[i], b_v[i], c_v[i]};
+      LatencyModel model{type_v[i], params};
+      models.push_back(model);
+    }
+  }
+
+  ~PiecewiseLatencyModel() override = default;
+
+  double Predict(double x = 0) override {
+    assert(type == PIECEWISE);
+    for (int i = 0; i < (int)valueRange.size(); i++) {
+      if (x < valueRange[i] || i == (int)valueRange.size() - 1) {
+        return models[i].Predict(x);
+      }
+    }
+
+    return 0;
+  }
+
+  void PrintModel(int i) override {
+    printf("Operation: %s\n"
+            "  Type:    %s\n",
+            GetOpLatencyTypeString((OpLatencyType)i).c_str(),
+            GetLatencyModelTypeString(type).c_str());
+    for (int j = 0; j < (int)models.size(); j++) {
+      printf("For x range up to %f, we have model:\n", valueRange[j]);
+      models[j].PrintModel(MAX_OP_LATENCY_TYPE);
+    }
+  }
 };
 
 // Analyze the performance of a db by providing cumulative stats over time.

@@ -632,6 +632,24 @@ struct AdvancedColumnFamilyOptions {
   std::shared_ptr<MemTableRepFactory> memtable_factory =
       std::shared_ptr<SkipListFactory>(new SkipListFactory);
 
+  // DIO memtable factory, used when switching memtable types
+  // DIONOTE: RocksDB has a weird performance problem. If I use self-created memtable factory,
+  //   the performance drops half, compared to using memtable factory created during system
+  //   initialization. I guess it was because of the object management system in RocksDB
+  //   so that objects initialized at the very beginning have better memory locality and they
+  //   are cache-friendly. As a bypass of this perf problem, we added the following field, default
+  //   to SkipList.
+  std::shared_ptr<MemTableRepFactory> skip_list_memtable_factory =
+      std::shared_ptr<SkipListFactory>(new SkipListFactory);
+  std::shared_ptr<MemTableRepFactory> hash_skip_list_memtable_factory =
+      std::shared_ptr<SkipListFactory>(new SkipListFactory);
+  std::shared_ptr<MemTableRepFactory> vector_memtable_factory =
+      std::shared_ptr<SkipListFactory>(new SkipListFactory);
+
+  // Main switches for DIO
+  bool enable_dynamic_index_organization = false;
+  double dynamic_index_organization_cost_adjust_factor = 0.8;
+  
   // Block-based table related options are moved to BlockBasedTableOptions.
   // Related options that were originally here but now moved include:
   //   no_block_cache
@@ -1093,6 +1111,21 @@ struct AdvancedColumnFamilyOptions {
   // reads. Enabling this feature incurs a performance overhead due to an
   // additional key comparison during memtable lookup.
   bool paranoid_memory_checks = false;
+
+
+  // DIO Options
+  size_t vector_preallocation_size_in_bytes = 16777216;
+
+  int32_t skiplist_height = 4;
+  int32_t skiplist_branching_factor = 4;
+  uint32_t prefix_length = 0;
+  
+  size_t bucket_count = 50000;
+  size_t linklist_huge_page_tlb_size = 0;
+  size_t linklist_bucket_entries_logging_threshold = 4096;
+  bool linklist_if_log_bucket_dist_when_flash = true;
+  size_t linklist_threshold_use_skiplist = 256;
+
 
   // Create ColumnFamilyOptions with default values for all fields
   AdvancedColumnFamilyOptions();

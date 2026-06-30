@@ -2632,4 +2632,12 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   }
   return s;
 }
+
+Status DBImpl::GetMemTableSizeInCF(ColumnFamilyHandle* column_family, size_t &size)
+{
+  Status s;
+  size = ((ColumnFamilyHandleImpl *)(column_family))->cfd()->mem()->ApproximateMemoryUsageFast();
+
+  return s;
+}
 }  // namespace ROCKSDB_NAMESPACE

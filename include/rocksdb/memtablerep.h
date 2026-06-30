@@ -44,6 +44,7 @@
 
 #include "rocksdb/customizable.h"
 #include "rocksdb/slice.h"
+#include "rocksdb/statistics.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -60,6 +61,11 @@ Slice GetLengthPrefixedSlice(const char* data);
 
 class MemTableRep {
  public:
+  MemTableType type = MAX_MEM_TABLE_TYPE;
+  // wasConverted is used to indicate if the current memtable was converted to another memtable.
+  // Any query (especially range query) runs on this memtable should be retried
+  volatile bool wasConverted = false;
+
   // KeyComparator provides a means to compare keys, which are internal keys
   // concatenated with values.
   class KeyComparator {
@@ -83,7 +89,9 @@ class MemTableRep {
     virtual ~KeyComparator() {}
   };
 
-  explicit MemTableRep(Allocator* allocator) : allocator_(allocator) {}
+  explicit MemTableRep(Allocator* allocator) : allocator_(allocator), immutable_(false) {}
+
+  virtual const SliceTransform* GetTransformer() {return nullptr;}
 
   // Allocate a buf of len size for storing key. The idea is that a
   // specific memtable representation knows its underlying data structure
@@ -169,7 +177,7 @@ class MemTableRep {
   // does nothing.  After MarkReadOnly() is called, this table rep will
   // not be written to (ie No more calls to Allocate(), Insert(),
   // or any writes done directly to entries accessed through the iterator.)
-  virtual void MarkReadOnly() {}
+  virtual void MarkReadOnly() {immutable_ = true;}
 
   // Notify this table rep that it has been flushed to stable storage.
   // By default, does nothing.
@@ -223,11 +231,45 @@ class MemTableRep {
   // that was allocated through the allocator.  Safe to call from any thread.
   virtual size_t ApproximateMemoryUsage() = 0;
 
+
   virtual ~MemTableRep() {}
 
   // Iteration over the contents of a skip collection
   class Iterator {
    public:
+    struct IterStat {
+      std::chrono::system_clock::time_point start;
+      bool scanForward;
+      int numRecordScaned;
+
+      explicit IterStat() { ResetValue(); }
+
+      void ResetValue() {
+        start = std::chrono::high_resolution_clock::now();
+        scanForward = true;
+        numRecordScaned = 0;
+      }
+
+
+      void RecordScanQuery() const {
+        if (curGlobalStat == nullptr) {
+          return;
+        }
+        uint64_t curNumRangeQuery = curGlobalStat->numRangeQuery.load(std::memory_order_relaxed);
+        uint64_t newNumRangeQuery = curNumRangeQuery + 1;
+        while (!curGlobalStat->numRangeQuery.compare_exchange_weak(curNumRangeQuery, newNumRangeQuery, std::memory_order_relaxed)) {
+          curNumRangeQuery = curGlobalStat->numRangeQuery.load(std::memory_order_relaxed);
+          newNumRangeQuery = curNumRangeQuery + 1;
+        }
+      }
+    };
+
+    // This bool indicates if this current iterator is created internally
+    bool internal_;
+    inline void SetInternal(bool val) {
+      internal_ = val;
+    }
+
     // Initialize an iterator over the specified collection.
     // The returned iterator is not valid.
     // explicit Iterator(const MemTableRep* collection);
@@ -289,6 +331,8 @@ class MemTableRep {
     // Position at the last entry in collection.
     // Final state of iterator is Valid() iff collection is not empty.
     virtual void SeekToLast() = 0;
+
+    IterStat stat;
   };
 
   // Return an iterator over the keys in this representation.
@@ -316,18 +360,27 @@ class MemTableRep {
   // Default: true
   virtual bool IsSnapshotSupported() const { return true; }
 
+  bool isImmutable() {return immutable_;}
+
  protected:
   // When *key is an internal key concatenated with the value, returns the
   // user key.
   virtual Slice UserKey(const char* key) const;
 
   Allocator* allocator_;
+  bool immutable_;
 };
 
 // This is the base class for all factories that are used by RocksDB to create
 // new MemTableRep objects
 class MemTableRepFactory : public Customizable {
  public:
+  MemTableType type = MAX_MEM_TABLE_TYPE;
+
+  virtual void PrintMemTableType() {
+    fprintf(stderr, "PrintMemTableType\n");
+  }
+
   ~MemTableRepFactory() override {}
 
   static const char* Type() { return "MemTableRepFactory"; }
@@ -372,6 +425,9 @@ class SkipListFactory : public MemTableRepFactory {
  public:
   explicit SkipListFactory(size_t lookahead = 0);
 
+  void PrintMemTableType() override {
+    fprintf(stderr, "New Memtable is SkipList\n");
+  }
   // Methods for Configurable/Customizable class overrides
   static const char* kClassName() { return "SkipListFactory"; }
   static const char* kNickName() { return "skip_list"; }
@@ -406,6 +462,10 @@ class VectorRepFactory : public MemTableRepFactory {
 
  public:
   explicit VectorRepFactory(size_t count = 0);
+
+  void PrintMemTableType() override {
+    fprintf(stderr, "New Memtable is Vector\n");
+  }
 
   // Methods for Configurable/Customizable class overrides
   static const char* kClassName() { return "VectorRepFactory"; }

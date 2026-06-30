@@ -649,6 +649,14 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableCFOptions, paranoid_memory_checks),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
+        {"enable_dynamic_index_organization",
+         {offsetof(struct MutableCFOptions, enable_dynamic_index_organization),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
+        {"dynamic_index_organization_cost_adjust_factor",
+         {offsetof(struct MutableCFOptions, dynamic_index_organization_cost_adjust_factor),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
         {kOptNameCompOpts,
          OptionTypeInfo::Struct(
              kOptNameCompOpts, &compression_options_type_info,
@@ -809,6 +817,45 @@ static std::unordered_map<std::string, OptionTypeInfo>
         {"memtable",
          {offsetof(struct ImmutableCFOptions, memtable_factory),
           OptionType::kCustomizable, OptionVerificationType::kAlias,
+          OptionTypeFlags::kShared,
+          [](const ConfigOptions& opts, const std::string&,
+             const std::string& value, void* addr) {
+            std::unique_ptr<MemTableRepFactory> factory;
+            auto* shared =
+                static_cast<std::shared_ptr<MemTableRepFactory>*>(addr);
+            Status s =
+                MemTableRepFactory::CreateFromString(opts, value, shared);
+            return s;
+          }}},
+        {"skip_list_memtable_factory",
+         {offsetof(struct ImmutableCFOptions, skip_list_memtable_factory),
+          OptionType::kCustomizable, OptionVerificationType::kByName,
+          OptionTypeFlags::kShared,
+          [](const ConfigOptions& opts, const std::string&,
+             const std::string& value, void* addr) {
+            std::unique_ptr<MemTableRepFactory> factory;
+            auto* shared =
+                static_cast<std::shared_ptr<MemTableRepFactory>*>(addr);
+            Status s =
+                MemTableRepFactory::CreateFromString(opts, value, shared);
+            return s;
+          }}},
+        {"hash_skip_list_memtable_factory",
+         {offsetof(struct ImmutableCFOptions, hash_skip_list_memtable_factory),
+          OptionType::kCustomizable, OptionVerificationType::kByName,
+          OptionTypeFlags::kShared,
+          [](const ConfigOptions& opts, const std::string&,
+             const std::string& value, void* addr) {
+            std::unique_ptr<MemTableRepFactory> factory;
+            auto* shared =
+                static_cast<std::shared_ptr<MemTableRepFactory>*>(addr);
+            Status s =
+                MemTableRepFactory::CreateFromString(opts, value, shared);
+            return s;
+          }}},
+        {"vector_memtable_factory",
+         {offsetof(struct ImmutableCFOptions, vector_memtable_factory),
+          OptionType::kCustomizable, OptionVerificationType::kByName,
           OptionTypeFlags::kShared,
           [](const ConfigOptions& opts, const std::string&,
              const std::string& value, void* addr) {
@@ -990,6 +1037,9 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       inplace_update_support(cf_options.inplace_update_support),
       inplace_callback(cf_options.inplace_callback),
       memtable_factory(cf_options.memtable_factory),
+      skip_list_memtable_factory(cf_options.skip_list_memtable_factory),
+      hash_skip_list_memtable_factory(cf_options.hash_skip_list_memtable_factory),
+      vector_memtable_factory(cf_options.vector_memtable_factory),
       table_properties_collector_factories(
           cf_options.table_properties_collector_factories),
       bloom_locality(cf_options.bloom_locality),
@@ -1005,8 +1055,18 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       compaction_thread_limiter(cf_options.compaction_thread_limiter),
       sst_partitioner_factory(cf_options.sst_partitioner_factory),
       blob_cache(cf_options.blob_cache),
+      vector_preallocation_size_in_bytes(cf_options.vector_preallocation_size_in_bytes),
+      prefix_length(cf_options.prefix_length),
+      skiplist_height(cf_options.skiplist_height),
+      skiplist_branching_factor(cf_options.skiplist_branching_factor),
       persist_user_defined_timestamps(
-          cf_options.persist_user_defined_timestamps) {}
+          cf_options.persist_user_defined_timestamps),
+      bucket_count(cf_options.bucket_count),
+      linklist_huge_page_tlb_size(cf_options.linklist_huge_page_tlb_size),
+      linklist_bucket_entries_logging_threshold(cf_options.linklist_bucket_entries_logging_threshold),
+      linklist_if_log_bucket_dist_when_flash(cf_options.linklist_if_log_bucket_dist_when_flash),
+      linklist_threshold_use_skiplist(cf_options.linklist_threshold_use_skiplist)    
+      {}
 
 ImmutableOptions::ImmutableOptions() : ImmutableOptions(Options()) {}
 

@@ -232,6 +232,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
   cf_opts->block_protection_bytes_per_key =
       moptions.block_protection_bytes_per_key;
   cf_opts->paranoid_memory_checks = moptions.paranoid_memory_checks;
+  cf_opts->enable_dynamic_index_organization = moptions.enable_dynamic_index_organization;
+  cf_opts->dynamic_index_organization_cost_adjust_factor = moptions.dynamic_index_organization_cost_adjust_factor;
   cf_opts->bottommost_file_compaction_delay =
       moptions.bottommost_file_compaction_delay;
 
@@ -318,6 +320,9 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
   cf_opts->inplace_update_support = ioptions.inplace_update_support;
   cf_opts->inplace_callback = ioptions.inplace_callback;
   cf_opts->memtable_factory = ioptions.memtable_factory;
+  cf_opts->skip_list_memtable_factory = ioptions.skip_list_memtable_factory;
+  cf_opts->hash_skip_list_memtable_factory = ioptions.hash_skip_list_memtable_factory;
+  cf_opts->vector_memtable_factory = ioptions.vector_memtable_factory;
   cf_opts->table_properties_collector_factories =
       ioptions.table_properties_collector_factories;
   cf_opts->bloom_locality = ioptions.bloom_locality;

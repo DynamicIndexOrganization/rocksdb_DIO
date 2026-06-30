@@ -542,6 +542,7 @@ Status FlushJob::MemPurge() {
           nullptr,   // KV protection info set as nullptr since it
                      // should only be useful for the first add to
                      // the original memtable.
+          false,     // Not in convert mode
           false,     // : allow concurrent_memtable_writes_
                      // Not seen as necessary for now.
           nullptr,   // get_post_process_info(m) must be nullptr
@@ -586,6 +587,7 @@ Status FlushJob::MemPurge() {
             nullptr,               // KV protection info set as nullptr since it
                                    // should only be useful for the first add to
                                    // the original memtable.
+            false,                 // Not in convert mode
             false,                 // : allow concurrent_memtable_writes_
                                    // Not seen as necessary for now.
             nullptr,               // get_post_process_info(m) must be nullptr

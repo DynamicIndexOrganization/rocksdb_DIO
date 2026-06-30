@@ -2247,7 +2247,7 @@ class MemTableInserter : public WriteBatch::Handler {
     assert(!seq_per_batch_ || !moptions->inplace_update_support);
     if (!moptions->inplace_update_support) {
       ret_status =
-          mem->Add(sequence_, value_type, key, value, kv_prot_info,
+          mem->Add(sequence_, value_type, key, value, kv_prot_info, false,
                    concurrent_memtable_writes_, get_post_process_info(mem),
                    hint_per_batch_ ? &GetHintMap()[mem] : nullptr);
     } else if (moptions->inplace_callback == nullptr ||
@@ -2356,6 +2356,7 @@ class MemTableInserter : public WriteBatch::Handler {
       ret_status =
           rebuild_txn_op(rebuilding_trx_, column_family_id, key, value);
     }
+
     return ret_status;
   }
 
@@ -2467,7 +2468,7 @@ class MemTableInserter : public WriteBatch::Handler {
     Status ret_status;
     MemTable* mem = cf_mems_->GetMemTable();
     ret_status =
-        mem->Add(sequence_, delete_type, key, value, kv_prot_info,
+        mem->Add(sequence_, delete_type, key, value, kv_prot_info, false,
                  concurrent_memtable_writes_, get_post_process_info(mem),
                  hint_per_batch_ ? &GetHintMap()[mem] : nullptr);
     if (UNLIKELY(ret_status.IsTryAgain())) {

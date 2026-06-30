@@ -753,6 +753,15 @@ DBImpl::~DBImpl() {
       ThreadStatusUtil::GetThreadOperation();
   ThreadStatusUtil::SetThreadOperation(ThreadStatus::OperationType::OP_UNKNOWN);
 
+#ifdef DIO_LATENCY_COLLECT
+  if (curGlobalLatencyCollect[0] != nullptr) {
+    for (int i = 0; i < MAX_OP_LATENCY_TYPE; i++) {
+      delete curGlobalLatencyCollect[i];
+      curGlobalLatencyCollect[i] = nullptr;
+    }
+  }
+#endif
+
   // TODO: remove this.
   init_logger_creation_s_.PermitUncheckedError();
 
@@ -2135,10 +2144,21 @@ InternalIterator* DBImpl::NewInternalIterator(
       !read_options.total_order_seek && prefix_extractor != nullptr,
       read_options.iterate_upper_bound);
   // Collect iterator for mutable memtable
+  auto curMem = super_version->mem;
   auto mem_iter = super_version->mem->NewIterator(
       read_options, super_version->GetSeqnoToTimeMapping(), arena,
       super_version->mutable_cf_options.prefix_extractor.get(),
       /*for_flush=*/false);
+  // when memtable is converted OR the mem_iter has a null iterator returned
+  // a memtable conversion happened. Now, retry the creation of memtable using
+  // the new memtable
+  while (super_version->mem != curMem || mem_iter->NullIter()) {
+    mem_iter = super_version->mem->NewIterator(
+      read_options, super_version->GetSeqnoToTimeMapping(), arena,
+      super_version->mutable_cf_options.prefix_extractor.get(),
+      /*for_flush=*/false);
+    curMem = super_version->mem;
+  }
   Status s;
   if (!read_options.ignore_range_deletions) {
     std::unique_ptr<TruncatedRangeDelIterator> mem_tombstone_iter;
@@ -2553,6 +2573,18 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
         RecordTick(stats_, MEMTABLE_HIT);
       }
     }
+
+    // Record how long we used to do the current point read
+    // We only care about the time querying the memtable.
+    if (curGlobalStat != nullptr) {
+      uint64_t curNumRead = curGlobalStat->numPointRead.load(std::memory_order_relaxed);
+      uint64_t newNumRead = curNumRead + 1;
+      while (!curGlobalStat->numPointRead.compare_exchange_weak(curNumRead, newNumRead, std::memory_order_relaxed)) {
+        curNumRead = curGlobalStat->numPointRead.load(std::memory_order_relaxed);
+        newNumRead = curNumRead + 1;
+      }
+    }
+  
     if (!s.ok() && !s.IsMergeInProgress() && !s.IsNotFound()) {
       assert(done);
       ReturnAndCleanupSuperVersion(cfd, sv);

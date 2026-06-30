@@ -39,6 +39,7 @@
 #include "memory/allocator.h"
 #include "port/port.h"
 #include "util/random.h"
+#include "rocksdb/statistics.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -108,8 +109,13 @@ class SkipList {
     // Position at the last entry in list.
     // Final state of iterator is Valid() iff list is not empty.
     void SeekToLast();
+    inline void SetInternal(bool val) {
+      internal_ = val;
+    }
 
    private:
+    // This field indicates if this iterator is created internally
+    bool internal_;
     const SkipList* list_;
     Node* node_;
     // Intentionally copyable
@@ -308,6 +314,12 @@ SkipList<Key, Comparator>::FindGreaterOrEqual(const Key& key) const {
   // to exit early on equality and the result wouldn't even be correct.
   // A concurrent insert might occur after FindLessThan(key) but before
   // we get a chance to call Next(0).
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(OpLatencyType::SKIPLIST_SEARCH) != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
   Node* x = head_;
   int level = GetMaxHeight() - 1;
   Node* last_bigger = nullptr;
@@ -321,6 +333,13 @@ SkipList<Key, Comparator>::FindGreaterOrEqual(const Key& key) const {
     int cmp =
         (next == nullptr || next == last_bigger) ? 1 : compare_(next->key, key);
     if (cmp == 0 || (cmp > 0 && level == 0)) {
+#ifdef DIO_LATENCY_COLLECT
+      if (GetOpLatencyCollect(OpLatencyType::SKIPLIST_SEARCH) != nullptr) {
+        auto stop = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+        GetOpLatencyCollect(OpLatencyType::SKIPLIST_SEARCH)->AddStat(GetMaxHeight(), (int)duration.count());
+      }
+#endif
       return next;
     } else if (cmp < 0) {
       // Keep searching in this list
@@ -458,6 +477,13 @@ SkipList<Key, Comparator>::SkipList(const Comparator cmp, Allocator* allocator,
 
 template <typename Key, class Comparator>
 void SkipList<Key, Comparator>::Insert(const Key& key) {
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(OpLatencyType::SKIPLIST_INSERT) != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
+
   // fast path for sequential insertion
   if (!KeyIsAfterNode(key, prev_[0]->NoBarrier_Next(0)) &&
       (prev_[0] == head_ || KeyIsAfterNode(key, prev_[0]))) {
@@ -506,6 +532,14 @@ void SkipList<Key, Comparator>::Insert(const Key& key) {
   }
   prev_[0] = x;
   prev_height_ = height;
+
+#ifdef DIO_LATENCY_COLLECT
+  if (GetOpLatencyCollect(OpLatencyType::SKIPLIST_INSERT) != nullptr) {
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    GetOpLatencyCollect(OpLatencyType::SKIPLIST_INSERT)->AddStat(GetMaxHeight(), (int)duration.count());
+  }
+#endif
 }
 
 template <typename Key, class Comparator>

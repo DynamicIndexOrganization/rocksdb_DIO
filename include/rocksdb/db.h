@@ -189,6 +189,14 @@ class DB {
     return s;
   }
 
+  static void PrintCurStat() {
+    if (curGlobalStat != nullptr) {
+      printf("Statistics::curGlobalStat:\n  MemTableType: %d\n  numInsertRecords: %lu\n  numPointRead: %lu\n  numRangeQuery: %lu\n",
+          curGlobalStat->type, curGlobalStat->numInsertRecords.load(),
+          curGlobalStat->numPointRead.load(), curGlobalStat->numRangeQuery.load());
+      }
+  }
+
   // Open DB with column families.
   // db_options specify database specific options
   // column_families is the vector of all column families in the database,
@@ -2172,6 +2180,16 @@ class DB {
   // secondary.
   virtual Status TryCatchUpWithPrimary() {
     return Status::NotSupported("Supported only by secondary instance");
+  }
+
+
+  virtual Status GetMemTableSizeInCF(ColumnFamilyHandle* column_family, size_t &size)
+  {
+    Status s;
+    (void)column_family;
+    (void)size;
+
+    return s;
   }
 };
 

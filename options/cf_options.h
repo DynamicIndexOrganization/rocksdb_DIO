@@ -52,6 +52,9 @@ struct ImmutableCFOptions {
                                    std::string* merged_value);
 
   std::shared_ptr<MemTableRepFactory> memtable_factory;
+  std::shared_ptr<MemTableRepFactory> skip_list_memtable_factory;
+  std::shared_ptr<MemTableRepFactory> hash_skip_list_memtable_factory;
+  std::shared_ptr<MemTableRepFactory> vector_memtable_factory;
 
   Options::TablePropertiesCollectorFactories
       table_properties_collector_factories;
@@ -81,7 +84,17 @@ struct ImmutableCFOptions {
 
   std::shared_ptr<Cache> blob_cache;
 
+  // DIO OPTIONS
+  size_t vector_preallocation_size_in_bytes;
+  uint32_t prefix_length;
+  int32_t skiplist_height;
+  int32_t skiplist_branching_factor;
   bool persist_user_defined_timestamps;
+  size_t bucket_count;
+  size_t linklist_huge_page_tlb_size;
+  size_t linklist_bucket_entries_logging_threshold;
+  bool linklist_if_log_bucket_dist_when_flash;
+  size_t linklist_threshold_use_skiplist;
 };
 
 struct ImmutableOptions : public ImmutableDBOptions, public ImmutableCFOptions {
@@ -104,7 +117,9 @@ struct ImmutableOptions : public ImmutableDBOptions, public ImmutableCFOptions {
 struct MutableCFOptions {
   static const char* kName() { return "MutableCFOptions"; }
   explicit MutableCFOptions(const ColumnFamilyOptions& options)
-      : write_buffer_size(options.write_buffer_size),
+      : enable_dynamic_index_organization(options.enable_dynamic_index_organization),
+        dynamic_index_organization_cost_adjust_factor(options.dynamic_index_organization_cost_adjust_factor),
+        write_buffer_size(options.write_buffer_size),
         max_write_buffer_number(options.max_write_buffer_number),
         arena_block_size(options.arena_block_size),
         memtable_prefix_bloom_size_ratio(
@@ -178,7 +193,9 @@ struct MutableCFOptions {
   }
 
   MutableCFOptions()
-      : write_buffer_size(0),
+      : enable_dynamic_index_organization(true),
+        dynamic_index_organization_cost_adjust_factor(0.8),
+        write_buffer_size(0),
         max_write_buffer_number(0),
         arena_block_size(0),
         memtable_prefix_bloom_size_ratio(0),
@@ -254,6 +271,8 @@ struct MutableCFOptions {
 #endif
 
   // Memtable related options
+  bool enable_dynamic_index_organization;
+  double dynamic_index_organization_cost_adjust_factor;
   size_t write_buffer_size;
   int max_write_buffer_number;
   size_t arena_block_size;

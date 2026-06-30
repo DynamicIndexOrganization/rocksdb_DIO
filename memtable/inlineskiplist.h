@@ -55,6 +55,7 @@
 #include "test_util/sync_point.h"
 #include "util/coding.h"
 #include "util/random.h"
+#include "rocksdb/statistics.h"
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -538,6 +539,12 @@ InlineSkipList<Comparator>::FindGreaterOrEqual(
   // to exit early on equality and the result wouldn't even be correct.
   // A concurrent insert might occur after FindLessThan(key) but before
   // we get a chance to call Next(0).
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(INLINE_SKIPLIST_SEARCH) != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
   Node* x = head_;
   int level = GetMaxHeight() - 1;
   Node* last_bigger = nullptr;
@@ -549,7 +556,7 @@ InlineSkipList<Comparator>::FindGreaterOrEqual(
       if (out_of_order_node && x != head_ &&
           compare_(x->Key(), next->Key()) >= 0) {
         *out_of_order_node = next;
-        return x;
+        goto end;
       }
     }
     // Make sure the lists are sorted
@@ -560,7 +567,8 @@ InlineSkipList<Comparator>::FindGreaterOrEqual(
                   ? 1
                   : compare_(next->Key(), key_decoded);
     if (cmp == 0 || (cmp > 0 && level == 0)) {
-      return next;
+      x = next;
+      goto end;
     } else if (cmp < 0) {
       // Keep searching in this list
       x = next;
@@ -570,6 +578,16 @@ InlineSkipList<Comparator>::FindGreaterOrEqual(
       level--;
     }
   }
+
+end:
+#ifdef DIO_LATENCY_COLLECT
+  if (GetOpLatencyCollect(INLINE_SKIPLIST_SEARCH) != nullptr) {
+      auto stop = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+      GetOpLatencyCollect(INLINE_SKIPLIST_SEARCH)->AddStat(GetMaxHeight(), (int)duration.count());
+  }
+#endif
+  return x;
 }
 
 template <class Comparator>
@@ -923,6 +941,12 @@ bool InlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
   int height = x->UnstashHeight();
   assert(height >= 1 && height <= kMaxHeight_);
 
+#ifdef DIO_LATENCY_COLLECT
+  std::chrono::_V2::system_clock::time_point start;
+  if (GetOpLatencyCollect(INLINE_SKIPLIST_INSERT) != nullptr) {
+    start = std::chrono::high_resolution_clock::now();
+  }
+#endif
   int max_height = max_height_.load(std::memory_order_relaxed);
   while (height > max_height) {
     if (max_height_.compare_exchange_weak(max_height, height)) {
@@ -1111,6 +1135,14 @@ bool InlineSkipList<Comparator>::Insert(const char* key, Splice* splice,
   } else {
     splice->height_ = 0;
   }
+#ifdef DIO_LATENCY_COLLECT
+  if (GetOpLatencyCollect(INLINE_SKIPLIST_INSERT) != nullptr) {
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+    GetOpLatencyCollect(INLINE_SKIPLIST_INSERT)->AddStat(GetMaxHeight(), (int)duration.count());
+  }
+#endif
+
   return true;
 }
 

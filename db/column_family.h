@@ -377,6 +377,10 @@ class ColumnFamilyData {
   MemTableList* imm() { return &imm_; }
   MemTable* mem() { return mem_; }
 
+  bool ShouldConvertMemtable();
+
+  Status ConvertMemtable(MemTable* old_mem, MemTable* new_mem);
+
   bool IsEmpty() {
     return mem()->GetFirstSequenceNumber() == 0 && imm()->NumNotFlushed() == 0;
   }
@@ -405,8 +409,11 @@ class ColumnFamilyData {
   // `mutable_cf_options` might need to be a saved copy if calling this without
   // holding the DB mutex.
   MemTable* ConstructNewMemtable(const MutableCFOptions& mutable_cf_options,
-                                 SequenceNumber earliest_seq);
+                                 SequenceNumber earliest_seq, bool updateNumEntries = true);
   void CreateNewMemtable(SequenceNumber earliest_seq);
+
+  Status ConvertCurrentMemtable(MutableCFOptions mutable_cf_options_copy);
+  Status ConvertImmutableMemtablesIfNeeded(MutableCFOptions mutable_cf_options_copy);
 
   TableCache* table_cache() const { return table_cache_.get(); }
   BlobFileCache* blob_file_cache() const { return blob_file_cache_.get(); }
@@ -588,6 +595,9 @@ class ColumnFamilyData {
     return (mem_->IsEmpty() ? 0 : 1) + imm_.NumNotFlushed();
   }
 
+  MemTable* mem_;
+  SuperVersion* super_version_;
+
  private:
   friend class ColumnFamilySet;
   ColumnFamilyData(uint32_t id, const std::string& name,
@@ -638,9 +648,7 @@ class ColumnFamilyData {
 
   WriteBufferManager* write_buffer_manager_;
 
-  MemTable* mem_;
   MemTableList imm_;
-  SuperVersion* super_version_;
 
   // An ordinal representing the current SuperVersion. Updated by
   // InstallSuperVersion(), i.e. incremented every time super_version_

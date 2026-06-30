@@ -172,6 +172,16 @@ else
 	CXXFLAGS += -fno-rtti
 endif
 
+ifneq ($(filter dio_sample, $(MAKECMDGOALS)),)
+	CXXFLAGS += -DDIO_LATENCY_COLLECT
+endif
+ifneq ($(findstring -DDIO_LATENCY_COLLECT,$(CXXFLAGS)),)
+$(info DIO_LATENCY_COLLECT is enabled)
+$(info RocksDB will be compiled with DIO_LATENCY_COLLECT flag enabled!!!!)
+else
+$(info DIO_LATENCY_COLLECT is disabled)
+endif
+
 ifdef ASSERT_STATUS_CHECKED
 # For ASC, turn off constructor elision, preventing the case where a constructor returned
 # by a method may pass the ASC check if the status is checked in the inner method.  Forcing
@@ -890,6 +900,9 @@ endif  # PLATFORM_SHARED_EXT
 	uninstall analyze tools tools_lib check-headers checkout_folly
 
 all: $(LIBRARY) $(BENCHMARKS) tools tools_lib test_libs $(TESTS)
+
+dio_sample: clean
+       LIB_MODE=$(LIB_MODE) DEBUG_LEVEL=0 $(MAKE) $(LIBRARY) tools db_bench
 
 all_but_some_tests: $(LIBRARY) $(BENCHMARKS) tools tools_lib test_libs $(ROCKSDBTESTS_SUBSET)
 
@@ -2138,8 +2151,8 @@ ROCKSDB_JAVADOCS_JAR = rocksdbjni-$(ROCKSDB_JAVA_VERSION)-javadoc.jar
 ROCKSDB_SOURCES_JAR = rocksdbjni-$(ROCKSDB_JAVA_VERSION)-sources.jar
 SHA256_CMD = sha256sum
 
-ZLIB_VER ?= 1.3.1
-ZLIB_SHA256 ?= 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+ZLIB_VER ?= 1.3.2
+ZLIB_SHA256 ?= bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
 ZLIB_DOWNLOAD_BASE ?= http://zlib.net
 BZIP2_VER ?= 1.0.8
 BZIP2_SHA256 ?= ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269

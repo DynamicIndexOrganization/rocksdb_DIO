@@ -7,6 +7,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #include <cinttypes>
+#include <chrono>
+#include <iostream>
 
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
@@ -504,7 +506,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
           &w, w.sequence, &column_family_memtables, &flush_scheduler_,
           &trim_history_scheduler_,
           write_options.ignore_missing_column_families, 0 /*log_number*/, this,
-          true /*concurrent_memtable_writes*/, seq_per_batch_, w.batch_cnt,
+          false /*concurrent_memtable_writes*/, seq_per_batch_, w.batch_cnt,
           batch_per_txn_, write_options.memtable_insert_hint_per_batch);
 
       PERF_TIMER_START(write_pre_and_post_process_time);
@@ -588,6 +590,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   IOStatus io_s;
   Status pre_release_cb_status;
   size_t seq_inc = 0;
+  size_t total_count = 0;
   if (status.ok()) {
     // Rules for when we can update the memtable concurrently
     // 1. supported by memtable
@@ -602,7 +605,6 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     // more than once to a particular key.
     bool parallel = immutable_db_options_.allow_concurrent_memtable_write &&
                     write_group.size > 1;
-    size_t total_count = 0;
     size_t valid_batches = 0;
     size_t total_byte_size = 0;
     size_t pre_release_callback_cnt = 0;
@@ -882,6 +884,12 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   if (status.ok()) {
     status = w.FinalStatus();
   }
+
+  if (curGlobalStat != nullptr) {
+    uint64_t curNumInsert = curGlobalStat->numInsertRecords.load(std::memory_order_relaxed);
+    // DIONOTE: Since we have only one thread doing insertion, it should be safe to just store the value here.
+    curGlobalStat->numInsertRecords.store(curNumInsert + total_count, std::memory_order_relaxed);
+  }
   return status;
 }
 
@@ -963,6 +971,12 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
     RecordTick(stats_, BYTES_WRITTEN, total_byte_size);
     RecordInHistogram(stats_, BYTES_PER_WRITE, total_byte_size);
 
+    if (curGlobalStat != nullptr) {
+      uint64_t curNumInsert = curGlobalStat->numInsertRecords.load(std::memory_order_relaxed);
+      uint64_t newNumInsert = curNumInsert + total_count;
+      curGlobalStat->numInsertRecords.store(newNumInsert, std::memory_order_relaxed);
+    }
+  
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
     IOStatus io_s;
@@ -2401,11 +2415,29 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
   log::Writer* new_log = nullptr;
   MemTable* new_mem = nullptr;
   IOStatus io_s;
+  Status s;
+  // For use outside of holding DB mutex
+  const MutableCFOptions mutable_cf_options_copy =
+      cfd->GetLatestMutableCFOptions();
+
+  // if we only need to convert memtable, don't do anything else but convert memtable here
+  if (cfd->ShouldConvertMemtable()) {
+    // Now, convert Immutable memtables here.
+    s = cfd->ConvertCurrentMemtable(mutable_cf_options_copy);
+    if (!s.ok()) {
+      return s;
+    }
+    s = cfd->ConvertImmutableMemtablesIfNeeded(mutable_cf_options_copy);
+    return s;
+  }
 
   // Recoverable state is persisted in WAL. After memtable switch, WAL might
   // be deleted, so we write the state to memtable to be persisted as well.
-  Status s = WriteRecoverableState();
+  s = WriteRecoverableState();
   if (!s.ok()) {
+    if (new_mem != nullptr) {
+      delete new_mem;
+    }
     return s;
   }
 
@@ -2428,9 +2460,6 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
   }
   uint64_t new_log_number =
       creating_new_log ? versions_->NewFileNumber() : logfile_number_;
-  // For use outside of holding DB mutex
-  const MutableCFOptions mutable_cf_options_copy =
-      cfd->GetLatestMutableCFOptions();
 
   // Set memtable_info for memtable sealed callback
   // TODO: memtable_info for `new_imm`
@@ -2482,8 +2511,10 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context,
     } else {
       seq = versions_->LastSequence();
     }
-    new_mem = cfd->ConstructNewMemtable(mutable_cf_options_copy,
-                                        /*earliest_seq=*/seq);
+    if (new_mem == nullptr) {
+      new_mem = cfd->ConstructNewMemtable(mutable_cf_options_copy,
+                                          /*earliest_seq=*/seq);
+    }
     context->superversion_context.NewSuperVersion();
 
     ROCKS_LOG_INFO(immutable_db_options_.info_log,

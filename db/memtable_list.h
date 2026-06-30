@@ -152,6 +152,7 @@ class MemTableListVersion {
 
  private:
   friend class MemTableList;
+  friend class ColumnFamilyData;
 
   friend Status InstallMemtableAtomicFlushResults(
       const autovector<MemTableList*>* imm_lists,
@@ -242,10 +243,10 @@ class MemTableList {
                         int64_t max_write_buffer_size_to_maintain)
       : imm_flush_needed(false),
         imm_trim_needed(false),
-        min_write_buffer_number_to_merge_(min_write_buffer_number_to_merge),
         current_(new MemTableListVersion(&current_memory_usage_,
                                          max_write_buffer_number_to_maintain,
                                          max_write_buffer_size_to_maintain)),
+        min_write_buffer_number_to_merge_(min_write_buffer_number_to_merge),
         num_flush_not_started_(0),
         commit_in_progress_(false),
         flush_requested_(false),
@@ -475,6 +476,9 @@ class MemTableList {
       const ColumnFamilyData* cfd, VersionSet* vset,
       LogsWithPrepTracker* prep_tracker) const;
 
+  // open up access right for converting immutable memtables
+  MemTableListVersion* current_;
+
  private:
   friend Status InstallMemtableAtomicFlushResults(
       const autovector<MemTableList*>* imm_lists,
@@ -498,8 +502,6 @@ class MemTableList {
                                      InstrumentedMutex* mu);
 
   const int min_write_buffer_number_to_merge_;
-
-  MemTableListVersion* current_;
 
   // the number of elements that still need flushing
   int num_flush_not_started_;
